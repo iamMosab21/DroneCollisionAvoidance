@@ -1,5 +1,5 @@
 #include <SFML/Graphics.hpp>
-#include "drone_controller.hpp"
+#include "drone_proximity.hpp"
 #include <vector>
 #include <cmath>
 #include <cstdlib>
@@ -61,19 +61,7 @@ int main() {
         float dt = clock.restart().asSeconds();
         radarAngle += 1.5f * dt;
 
-        std::vector<Acceleration> commands(drones.size());
         for (size_t i = 0; i < drones.size(); ++i) {
-            if (!drones[i].crashed)
-                commands[i] = computeDroneSteering(drones[i], drones);
-        }
-
-        for (size_t i = 0; i < drones.size(); ++i) {
-            if (drones[i].crashed)
-                continue;
-
-            drones[i].vx += commands[i].ax * dt;
-            drones[i].vy += commands[i].ay * dt;
-
             float speed = std::sqrt(drones[i].vx * drones[i].vx +
                                     drones[i].vy * drones[i].vy);
             if (speed > maxSpeed) {
@@ -101,26 +89,31 @@ int main() {
             }
         }
 
-        int activeCount = 0;
-        for (size_t i = 0; i < drones.size(); ++i) {
-            if (!drones[i].crashed)
-                ++activeCount;
-
-            for (size_t j = i + 1; j < drones.size(); ++j) {
-                if (drones[i].crashed || drones[j].crashed)
-                    continue;
-
-                float dx = drones[i].x - drones[j].x;
-                float dy = drones[i].y - drones[j].y;
-                float dist = std::sqrt(dx * dx + dy * dy);
-                if (dist < droneRadius * 2.0f) {
-                    drones[i].crashed = true;
-                    drones[j].crashed = true;
-                }
-            }
-        }
+        DroneProximity proximity = getDroneProximity(drones);
+        const DronePair& closestPair = proximity.closestPair;
 
         window.clear(sf::Color(10, 20, 15));
+
+        if (proximity.warning) {
+            for (const DronePoint& point : {closestPair.first, closestPair.second}) {
+                sf::CircleShape warningRing(DroneProximityWarningDistance);
+                warningRing.setOrigin(
+                    {DroneProximityWarningDistance, DroneProximityWarningDistance});
+                warningRing.setPosition({point.x, point.y});
+                warningRing.setFillColor(sf::Color::Transparent);
+                warningRing.setOutlineThickness(2.0f);
+                warningRing.setOutlineColor(sf::Color(255, 70, 60, 120));
+                window.draw(warningRing);
+            }
+
+            sf::Vertex link[] = {
+                sf::Vertex{{closestPair.first.x, closestPair.first.y},
+                           sf::Color(255, 70, 60, 180)},
+                sf::Vertex{{closestPair.second.x, closestPair.second.y},
+                           sf::Color(255, 70, 60, 180)}
+            };
+            window.draw(link, 2, sf::PrimitiveType::Lines);
+        }
 
         sf::CircleShape ring;
         ring.setFillColor(sf::Color::Transparent);
@@ -140,38 +133,47 @@ int main() {
         window.draw(sweep);
 
         for (const Drone& d : drones) {
-            sf::CircleShape shape(d.crashed ? droneRadius + 4.0f : droneRadius);
+            bool isClosestPairDrone =
+                proximity.warning &&
+                (d.id == closestPair.first.id || d.id == closestPair.second.id);
+            sf::CircleShape shape(droneRadius);
             shape.setOrigin({shape.getRadius(), shape.getRadius()});
             shape.setPosition({d.x, d.y});
-            shape.setFillColor(d.crashed ? sf::Color::Red : sf::Color::Green);
+            shape.setFillColor(isClosestPairDrone ? sf::Color(240, 65, 55)
+                                                   : sf::Color::Green);
             window.draw(shape);
 
-            if (d.crashed) {
-                sf::Text label(font, "CRASH", 10);
-                label.setFillColor(sf::Color::Red);
-                label.setPosition({d.x - 18.0f, d.y - 22.0f});
-                window.draw(label);
-            } else {
-                sf::Vertex line[] = {
-                    sf::Vertex{{d.x, d.y}, sf::Color::Yellow},
-                    sf::Vertex{{d.x + d.vx * 0.25f, d.y + d.vy * 0.25f},
-                               sf::Color::Yellow}
-                };
-                window.draw(line, 2, sf::PrimitiveType::Lines);
-            }
+            sf::Vertex line[] = {
+                sf::Vertex{{d.x, d.y}, sf::Color::Yellow},
+                sf::Vertex{{d.x + d.vx * 0.25f, d.y + d.vy * 0.25f},
+                           sf::Color::Yellow}
+            };
+            window.draw(line, 2, sf::PrimitiveType::Lines);
         }
 
-        sf::Text activeText(font,
-                            "Active Drones: " + std::to_string(activeCount) +
-                            " / " + std::to_string(numDrones),
-                            20);
-        activeText.setFillColor(sf::Color::White);
-        activeText.setPosition({20.0f, 20.0f});
-        window.draw(activeText);
+        sf::Text proximityText(
+            font,
+            proximity.warning ? "PROXIMITY WARNING" : "Proximity clear",
+            20);
+        proximityText.setFillColor(proximity.warning ? sf::Color(255, 90, 75)
+                                                     : sf::Color::White);
+        proximityText.setPosition({20.0f, 20.0f});
+        window.draw(proximityText);
 
-        sf::Text instruction(font, "Edit drone_controller.hpp to control the drones!", 16);
+        sf::Text nearestText(
+            font,
+            "Nearest pair distance: " +
+                (std::isfinite(closestPair.distance)
+                     ? std::to_string(static_cast<int>(closestPair.distance))
+                     : std::string("N/A")),
+            16);
+        nearestText.setFillColor(sf::Color(200, 200, 200));
+        nearestText.setPosition({20.0f, 48.0f});
+        window.draw(nearestText);
+
+        sf::Text instruction(font, "Drones: " + std::to_string(drones.size()), 16);
         instruction.setFillColor(sf::Color(200, 200, 200));
-        instruction.setPosition({20.0f, 48.0f});
+        instruction.setPosition({20.0f, 72.0f});
         window.draw(instruction);
 
         window.display();
